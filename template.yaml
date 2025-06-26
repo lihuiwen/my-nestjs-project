@@ -1,0 +1,450 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'NestJS API Lambda Deployment with VPC and Database Access'
+
+# ========================================
+# PARAMETERS - 输入参数
+# ========================================
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+  
+  DatabaseHost:
+    Type: String
+    Description: RDS PostgreSQL endpoint
+  
+  DatabaseName:
+    Type: String
+    Default: nestjs_db
+    Description: Database name
+  
+  DatabaseUsername:
+    Type: String
+    Description: Database master username
+  
+  DatabasePassword:
+    Type: String
+    NoEcho: true
+    Description: Database master password
+  
+  ReadReplicaHost:
+    Type: String
+    Description: RDS Read Replica endpoint (optional)
+    Default: ""
+
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub Personal Access Token
+
+# ========================================
+# CONDITIONS - 条件判断
+# ========================================
+Conditions:
+  HasReadReplica: !Not [!Equals [!Ref ReadReplicaHost, ""]]
+
+# ========================================
+# GLOBALS - 全局配置
+# ========================================
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 1536  # 📍 增加内存以支持 NestJS + Prisma
+    Runtime: nodejs20.x
+    Environment:
+      Variables:
+        NODE_ENV: !Ref Environment
+        DATABASE_URL: !Sub 'postgresql://${DatabaseUsername}:${DatabasePassword}@${DatabaseHost}:5432/${DatabaseName}'
+        READ_DATABASE_URL: !Sub 
+          - 'postgresql://${DatabaseUsername}:${DatabasePassword}@${ReadHost}:5432/${DatabaseName}'
+          - ReadHost: !If [HasReadReplica, !Ref ReadReplicaHost, !Ref DatabaseHost]
+        ALLOWED_GITHUB_ENDPOINTS: "api.github.com/user/repos,api.github.com/users"
+        # 📍 Prisma 相关环境变量
+        PRISMA_CLI_BINARY_TARGETS: "rhel-openssl-3.0.x"
+        GITHUB_TOKEN: !Ref GitHubToken
+
+# ========================================
+# RESOURCES - 资源定义
+# ========================================
+Resources:
+
+  # =====================================
+  # VPC CONFIGURATION - VPC配置
+  # =====================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+
+  # =====================================
+  # INTERNET GATEWAY - 互联网网关
+  # =====================================
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  # =====================================
+  # NAT GATEWAY - NAT网关配置
+  # =====================================
+  # NAT Gateway Elastic IP
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  # NAT Gateway for private subnet internet access
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  # =====================================
+  # SUBNETS - 子网配置
+  # =====================================
+  
+  # Public Subnet (for NAT Gateway)
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet'
+
+  # Private Subnets for Lambda deployment
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.3.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-2'
+
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [2, !GetAZs '']
+      CidrBlock: 10.0.4.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-3'
+
+  # Database Subnets
+  DatabaseSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.5.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-subnet-1'
+
+  DatabaseSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.6.0/24
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-subnet-2'
+
+  # =====================================
+  # ROUTE TABLES - 路由表配置
+  # =====================================
+  
+  # Public Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-routes'
+
+  # Default route for public subnet (to Internet Gateway)
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Associate public subnet with public route table
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  # Private Route Table
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-routes'
+
+  # Default route for private subnets (to NAT Gateway)
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  # Associate private subnets with private route table
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  PrivateSubnet3RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet3
+
+  # =====================================
+  # SECURITY GROUPS - 安全组配置
+  # =====================================
+  
+  # Lambda Security Group
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-lambda-sg'
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        # Allow HTTPS outbound for GitHub API access
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS outbound for GitHub API
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-lambda-sg'
+
+  # Database Security Group
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-database-sg'
+      GroupDescription: Security group for RDS database
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-database-sg'
+  
+  # 单独创建安全组规则，避免循环依赖
+  DatabaseSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Description: PostgreSQL access from Lambda
+
+  LambdaSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref DatabaseSecurityGroup
+      Description: PostgreSQL access to database
+
+  # =====================================
+  # DATABASE INFRASTRUCTURE - 数据库基础设施
+  # =====================================
+  
+  # Database Subnet Group
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS database
+      SubnetIds:
+        - !Ref DatabaseSubnet1
+        - !Ref DatabaseSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-db-subnet-group'
+
+  # =====================================
+  # APPLICATION SERVICES - 应用服务
+  # =====================================
+  
+  # API Gateway
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+      EndpointConfiguration:
+        Type: REGIONAL
+
+  # 📍 简化的 Lambda Layer（只包含最基本的运行时依赖）
+  # NestLayer:
+  #   Type: AWS::Serverless::LayerVersion
+  #   Properties:
+  #     LayerName: !Sub '${AWS::StackName}-runtime-deps'
+  #     Description: "Minimal runtime dependencies"
+  #     ContentUri: layers/nest/
+  #     CompatibleRuntimes:
+  #       - nodejs20.x
+  #     RetentionPolicy: Retain
+  #   Metadata:
+  #     BuildMethod: nodejs20.x
+  NodeModulesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: nest-dependencies
+      Description: Node modules for Nest.js application
+      ContentUri: layers/nest/
+      CompatibleRuntimes:
+        - nodejs20.x
+      RetentionPolicy: Retain
+
+  NestJSFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-nestjs-api'
+      CodeUri: deploy/
+      Handler: lambda.handler
+      Runtime: nodejs20.x
+      Timeout: 30
+      MemorySize: 3008  # 📍 增加内存支持完整的 NestJS 应用
+      Layers:
+        - !Ref NodeModulesLayer
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+          - !Ref PrivateSubnet3
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /{proxy+}
+            Method: ANY
+        # 📍 添加根路径处理
+        RootApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /
+            Method: ANY
+      Environment:
+        Variables:
+          NODE_ENV: !Ref Environment
+          GITHUB_API_WHITELIST_ENABLED: "true"
+          DATABASE_URL: !Sub "postgresql://${DatabaseUsername}:${DatabasePassword}@${DatabaseHost}:5432/${DatabaseName}"
+          READ_DATABASE_URL: !Sub 
+            - "postgresql://${DatabaseUsername}:${DatabasePassword}@${ReadHost}:5432/${DatabaseName}"
+            - ReadHost: !If [HasReadReplica, !Ref ReadReplicaHost, !Ref DatabaseHost]
+          # 📍 Prisma 相关环境变量
+          PRISMA_CLI_BINARY_TARGETS: "rhel-openssl-3.0.x"
+          # 📍 Lambda 优化环境变量
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: "1"
+          NODE_OPTIONS: "--enable-source-maps"
+    Metadata:
+      BuildMethod: nodejs20.x
+      BuildProperties:
+        # 📍 确保 SAM 不会重新安装依赖
+        SkipBuild: true
+
+# ========================================
+# OUTPUTS - 输出
+# ========================================
+Outputs:
+  # API Gateway endpoint URL
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/'
+    Export:
+      Name: !Sub '${AWS::StackName}-api-url'
+
+  # Lambda Function ARN
+  LambdaFunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt NestJSFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-lambda-arn'
+
+  # VPC ID for reference
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-vpc-id'
+
+  # Database Security Group for RDS creation
+  DatabaseSecurityGroupId:
+    Description: Database Security Group ID
+    Value: !Ref DatabaseSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-db-sg-id'
+
+  # Database Subnet Group for RDS creation
+  DatabaseSubnetGroupName:
+    Description: Database Subnet Group Name
+    Value: !Ref DatabaseSubnetGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-db-subnet-group'
