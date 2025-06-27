@@ -9,6 +9,9 @@ import { configure as serverlessExpress } from '@vendia/serverless-express';
 
 let cachedServer: any;
 
+// 📍 版本标识符 - 修改此值来强制更新 Lambda
+const DEPLOY_VERSION = '2.1.0';
+
 async function bootstrap() {
   if (!cachedServer) {
     const expressApp = express();

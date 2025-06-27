@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: 'NestJS API Lambda Deployment with Aurora Serverless v2 and VPC'
+Description: 'NestJS API Lambda Deployment with VPC and Database Access'
 
 # ========================================
 # PARAMETERS - 输入参数
@@ -19,7 +19,6 @@ Parameters:
   
   DatabaseUsername:
     Type: String
-    Default: postgres
     Description: Database master username
   
   DatabasePassword:
@@ -32,24 +31,9 @@ Parameters:
     NoEcho: true
     Description: GitHub Personal Access Token
 
-  # 🆕 新增 Serverless v2 扩缩容参数
-  MinCapacity:
-    Type: Number
-    Default: 0
-    Description: Minimum Aurora Serverless v2 capacity (ACUs) - 0 means auto-pause
-    AllowedValues: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8]
-
-  MaxCapacity:
-    Type: Number
-    Default: 4
-    Description: Maximum Aurora Serverless v2 capacity (ACUs)
-    AllowedValues: [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 10, 12, 16, 20, 24, 28, 32]
-
 # ========================================
 # CONDITIONS - 条件判断
 # ========================================
-Conditions:
-  IsProduction: !Equals [!Ref Environment, prod]
 
 # ========================================
 # GLOBALS - 全局配置
@@ -57,12 +41,13 @@ Conditions:
 Globals:
   Function:
     Timeout: 30
-    MemorySize: 1536
+    MemorySize: 1536  # 📍 增加内存以支持 NestJS + Prisma
     Runtime: nodejs20.x
     Environment:
       Variables:
         NODE_ENV: !Ref Environment
         ALLOWED_GITHUB_ENDPOINTS: "api.github.com/user/repos,api.github.com/users"
+        # 📍 Prisma 相关环境变量
         PRISMA_CLI_BINARY_TARGETS: "rhel-openssl-3.0.x"
         GITHUB_TOKEN: !Ref GitHubToken
 
@@ -103,12 +88,14 @@ Resources:
   # =====================================
   # NAT GATEWAY - NAT网关配置
   # =====================================
+  # NAT Gateway Elastic IP
   NATGatewayEIP:
     Type: AWS::EC2::EIP
     DependsOn: InternetGatewayAttachment
     Properties:
       Domain: vpc
 
+  # NAT Gateway for private subnet internet access
   NATGateway:
     Type: AWS::EC2::NatGateway
     Properties:
@@ -196,6 +183,7 @@ Resources:
         - Key: Name
           Value: !Sub '${AWS::StackName}-public-routes'
 
+  # Default route for public subnet (to Internet Gateway)
   DefaultPublicRoute:
     Type: AWS::EC2::Route
     DependsOn: InternetGatewayAttachment
@@ -204,6 +192,7 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
+  # Associate public subnet with public route table
   PublicSubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -219,6 +208,7 @@ Resources:
         - Key: Name
           Value: !Sub '${AWS::StackName}-private-routes'
 
+  # Default route for private subnets (to NAT Gateway)
   DefaultPrivateRoute:
     Type: AWS::EC2::Route
     Properties:
@@ -226,6 +216,7 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NATGateway
 
+  # Associate private subnets with private route table
   PrivateSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -244,19 +235,6 @@ Resources:
       RouteTableId: !Ref PrivateRouteTable
       SubnetId: !Ref PrivateSubnet3
 
-  # Database Subnet Route Table Associations (确保数据库完全私有)
-  DatabaseSubnet1RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable
-      SubnetId: !Ref DatabaseSubnet1
-
-  DatabaseSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable
-      SubnetId: !Ref DatabaseSubnet2
-
   # =====================================
   # SECURITY GROUPS - 安全组配置
   # =====================================
@@ -269,39 +247,41 @@ Resources:
       GroupDescription: Security group for Lambda functions
       VpcId: !Ref VPC
       SecurityGroupEgress:
+        # Allow HTTPS outbound for GitHub API access
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
           Description: HTTPS outbound for GitHub API
+        # Allow HTTP outbound for package downloads
         - IpProtocol: tcp
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
           Description: HTTP outbound
+        # Allow DNS outbound (UDP)
         - IpProtocol: udp
           FromPort: 53
           ToPort: 53
           CidrIp: 0.0.0.0/0
           Description: DNS resolution (UDP)
+        # Allow DNS outbound (TCP)
         - IpProtocol: tcp
           FromPort: 53
           ToPort: 53
           CidrIp: 0.0.0.0/0
           Description: DNS resolution (TCP)
-        # 🔧 明确的数据库访问规则将在下面单独定义
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-lambda-sg'
 
-  # Database Security Group  
+  # Database Security Group
   DatabaseSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub '${AWS::StackName}-database-sg'
-      GroupDescription: Security group for Aurora Serverless v2 database
+      GroupDescription: Security group for RDS database
       VpcId: !Ref VPC
-      # 🔐 简化配置，避免循环依赖
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-database-sg'
@@ -317,7 +297,6 @@ Resources:
       SourceSecurityGroupId: !Ref LambdaSecurityGroup
       Description: PostgreSQL access from Lambda
 
-  # 添加Lambda到数据库的出站规则
   LambdaSecurityGroupEgress:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
@@ -329,14 +308,14 @@ Resources:
       Description: PostgreSQL access to database
 
   # =====================================
-  # DATABASE INFRASTRUCTURE - Aurora Serverless v2
+  # DATABASE INFRASTRUCTURE - 数据库基础设施
   # =====================================
   
   # Database Subnet Group
   DatabaseSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
-      DBSubnetGroupDescription: Subnet group for Aurora Serverless v2 database
+      DBSubnetGroupDescription: Subnet group for RDS database
       SubnetIds:
         - !Ref DatabaseSubnet1
         - !Ref DatabaseSubnet2
@@ -344,32 +323,23 @@ Resources:
         - Key: Name
           Value: !Sub '${AWS::StackName}-db-subnet-group'
 
-  # Aurora Serverless v2 集群参数组
+  # 📍 新增：RDS 集群参数组
   DatabaseClusterParameterGroup:
     Type: AWS::RDS::DBClusterParameterGroup
     Properties:
-      Description: Parameter group for Aurora Serverless v2 PostgreSQL cluster
+      Description: Parameter group for PostgreSQL cluster
       Family: aurora-postgresql16
       Parameters:
         log_statement: "all"
         log_min_duration_statement: 1000
-        shared_preload_libraries: "pg_stat_statements"
 
-  # 🔧 Aurora Serverless v2 集群
+  # 📍 新增：RDS 集群
   DatabaseCluster:
     Type: AWS::RDS::DBCluster
     Properties:
-      DBClusterIdentifier: !Sub '${AWS::StackName}-serverless-cluster'
+      DBClusterIdentifier: !Sub '${AWS::StackName}-cluster'
       Engine: aurora-postgresql
-      EngineVersion: '16.4'  # 🔧 使用支持 0 ACU 的版本
-      EngineMode: provisioned
-      Port: 5432  # 🔧 明确设置PostgreSQL端口
-      # 🆕 Serverless v2 扩缩容配置
-      ServerlessV2ScalingConfiguration:
-        MinCapacity: !Ref MinCapacity
-        MaxCapacity: !Ref MaxCapacity
-        SecondsUntilAutoPause: 300  # 5分钟无活动后自动暂停
-      
+      EngineVersion: '16.1'
       MasterUsername: !Ref DatabaseUsername
       MasterUserPassword: !Ref DatabasePassword
       DatabaseName: !Ref DatabaseName
@@ -377,72 +347,31 @@ Resources:
       VpcSecurityGroupIds:
         - !Ref DatabaseSecurityGroup
       DBClusterParameterGroupName: !Ref DatabaseClusterParameterGroup
-      
-      # 备份和维护配置
       BackupRetentionPeriod: 7
       PreferredBackupWindow: "03:00-04:00"
       PreferredMaintenanceWindow: "sun:04:00-sun:05:00"
       DeletionProtection: false
       StorageEncrypted: true
-      
-      # Serverless v2 特有配置
-      EnableHttpEndpoint: false
-      ManageMasterUserPassword: false
-      
-      # 🔧 添加网络和连接配置
-      EnableCloudwatchLogsExports:
-        - postgresql
-      
       Tags:
         - Key: Name
-          Value: !Sub '${AWS::StackName}-serverless-cluster'
+          Value: !Sub '${AWS::StackName}-cluster'
         - Key: Environment
           Value: !Ref Environment
-        - Key: Engine
-          Value: Aurora-Serverless-v2
 
-  # 🔧 Aurora Serverless v2 Writer 实例
+  # 📍 新增：RDS 实例
   DatabaseInstance:
     Type: AWS::RDS::DBInstance
     Properties:
-      DBInstanceIdentifier: !Sub '${AWS::StackName}-serverless-writer'
+      DBInstanceIdentifier: !Sub '${AWS::StackName}-instance-1'
       DBClusterIdentifier: !Ref DatabaseCluster
-      DBInstanceClass: db.serverless  # 🆕 Serverless v2 必须使用这个实例类
+      DBInstanceClass: db.t3.micro
       Engine: aurora-postgresql
       PubliclyAccessible: false
-      
-      # 性能洞察配置
-      EnablePerformanceInsights: true
-      PerformanceInsightsRetentionPeriod: 7  # 免费版保留 7 天
-      
       Tags:
         - Key: Name
-          Value: !Sub '${AWS::StackName}-serverless-writer'
+          Value: !Sub '${AWS::StackName}-instance-1'
         - Key: Environment
           Value: !Ref Environment
-        - Key: Role
-          Value: Writer
-
-  # 🆕 可选：Aurora Serverless v2 Reader 实例（仅生产环境）
-  DatabaseReaderInstance:
-    Type: AWS::RDS::DBInstance
-    Condition: IsProduction
-    Properties:
-      DBInstanceIdentifier: !Sub '${AWS::StackName}-serverless-reader'
-      DBClusterIdentifier: !Ref DatabaseCluster
-      DBInstanceClass: db.serverless
-      Engine: aurora-postgresql
-      PubliclyAccessible: false
-      EnablePerformanceInsights: true
-      PerformanceInsightsRetentionPeriod: 7
-      PromotionTier: 2  # 独立扩缩容
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-serverless-reader'
-        - Key: Environment
-          Value: !Ref Environment
-        - Key: Role
-          Value: Reader
 
   # =====================================
   # APPLICATION SERVICES - 应用服务
@@ -461,18 +390,28 @@ Resources:
       EndpointConfiguration:
         Type: REGIONAL
 
-  # Lambda Layer for Node Modules
+  # 📍 简化的 Lambda Layer（只包含最基本的运行时依赖）
+  # NestLayer:
+  #   Type: AWS::Serverless::LayerVersion
+  #   Properties:
+  #     LayerName: !Sub '${AWS::StackName}-runtime-deps'
+  #     Description: "Minimal runtime dependencies"
+  #     ContentUri: layers/nest/
+  #     CompatibleRuntimes:
+  #       - nodejs20.x
+  #     RetentionPolicy: Retain
+  #   Metadata:
+  #     BuildMethod: nodejs20.x
   NodeModulesLayer:
     Type: AWS::Serverless::LayerVersion
     Properties:
-      LayerName: !Sub '${AWS::StackName}-nest-dependencies'
+      LayerName: nest-dependencies
       Description: Node modules for Nest.js application
       ContentUri: layers/nest/
       CompatibleRuntimes:
         - nodejs20.x
       RetentionPolicy: Retain
 
-  # NestJS Lambda Function
   NestJSFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -481,7 +420,7 @@ Resources:
       Handler: lambda.handler
       Runtime: nodejs20.x
       Timeout: 30
-      MemorySize: 3008  # 使用最大允许内存
+      MemorySize: 3008  # 📍 使用最大允许内存
       Layers:
         - !Ref NodeModulesLayer
       VpcConfig:
@@ -498,6 +437,7 @@ Resources:
             RestApiId: !Ref ApiGateway
             Path: /{proxy+}
             Method: ANY
+        # 📍 添加根路径处理
         RootApiEvent:
           Type: Api
           Properties:
@@ -508,30 +448,24 @@ Resources:
         Variables:
           NODE_ENV: !Ref Environment
           GITHUB_API_WHITELIST_ENABLED: "true"
-          # 🔧 简化数据库连接字符串配置
+          # 📍 使用新创建的 RDS 集群端点
           DATABASE_URL: !Sub 
-            - "postgresql://${DatabaseUsername}:${DatabasePassword}@${ClusterEndpoint}:5432/${DatabaseName}?schema=public&sslmode=require"
+            - "postgresql://${DatabaseUsername}:${DatabasePassword}@${ClusterEndpoint}:5432/${DatabaseName}"
             - ClusterEndpoint: !GetAtt DatabaseCluster.Endpoint.Address
           READ_DATABASE_URL: !Sub 
-            - "postgresql://${DatabaseUsername}:${DatabasePassword}@${ReaderEndpoint}:5432/${DatabaseName}?schema=public&sslmode=require"
-            - ReaderEndpoint: !GetAtt DatabaseCluster.ReadEndpoint.Address
-          # Prisma 相关环境变量
+            - "postgresql://${DatabaseUsername}:${DatabasePassword}@${ClusterEndpoint}:5432/${DatabaseName}"
+            - ClusterEndpoint: !GetAtt DatabaseCluster.Endpoint.Address
+          # 📍 Prisma 相关环境变量
           PRISMA_CLI_BINARY_TARGETS: "rhel-openssl-3.0.x"
+          # 📍 明确指定 binary 文件位置
           PRISMA_QUERY_ENGINE_LIBRARY: "/var/task/libquery_engine-rhel-openssl-3.0.x.so.node"
-          # Lambda 基础优化环境变量
+          # 📍 Lambda 优化环境变量
           AWS_NODEJS_CONNECTION_REUSE_ENABLED: "1"
           NODE_OPTIONS: "--enable-source-maps"
-          # 添加调试信息
-          PRISMA_LOG_LEVEL: "warn"
-          # 🔧 临时跳过数据库连接用于测试
-          # SKIP_DB_CONNECTION: "true"
-          # 确保数据库参数正确传递
-          DATABASE_NAME: !Ref DatabaseName
-          DATABASE_USERNAME: !Ref DatabaseUsername
-          APP_REGION: !Ref AWS::Region
     Metadata:
       BuildMethod: nodejs20.x
       BuildProperties:
+        # 📍 禁用 SAM 的 npm install，使用我们预先准备的文件
         SkipBuild: true
 
 # ========================================
@@ -552,55 +486,42 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-lambda-arn'
 
-  # VPC ID
+  # VPC ID for reference
   VPCId:
     Description: VPC ID
     Value: !Ref VPC
     Export:
       Name: !Sub '${AWS::StackName}-vpc-id'
 
-  # 🔧 Aurora Serverless v2 相关输出
-  DatabaseClusterEndpoint:
-    Description: Aurora Serverless v2 Cluster Writer Endpoint
-    Value: !GetAtt DatabaseCluster.Endpoint.Address
-    Export:
-      Name: !Sub '${AWS::StackName}-db-cluster-endpoint'
-
-  DatabaseClusterReaderEndpoint:
-    Description: Aurora Serverless v2 Cluster Reader Endpoint
-    Value: !GetAtt DatabaseCluster.ReadEndpoint.Address
-    Export:
-      Name: !Sub '${AWS::StackName}-db-cluster-reader-endpoint'
-
-  DatabaseClusterPort:
-    Description: Aurora Serverless v2 Cluster Port
-    Value: !GetAtt DatabaseCluster.Endpoint.Port
-    Export:
-      Name: !Sub '${AWS::StackName}-db-cluster-port'
-
-  DatabaseClusterIdentifier:
-    Description: Aurora Serverless v2 Cluster Identifier
-    Value: !Ref DatabaseCluster
-    Export:
-      Name: !Sub '${AWS::StackName}-db-cluster-id'
-
-  # 🆕 Serverless v2 特有信息
-  ServerlessCapacityRange:
-    Description: Aurora Serverless v2 Capacity Range
-    Value: !Sub "${MinCapacity} - ${MaxCapacity} ACUs"
-    Export:
-      Name: !Sub '${AWS::StackName}-capacity-range'
-
-  # Database Security Group
+  # Database Security Group for RDS creation
   DatabaseSecurityGroupId:
     Description: Database Security Group ID
     Value: !Ref DatabaseSecurityGroup
     Export:
       Name: !Sub '${AWS::StackName}-db-sg-id'
 
-  # Database Subnet Group
+  # Database Subnet Group for RDS creation
   DatabaseSubnetGroupName:
     Description: Database Subnet Group Name
     Value: !Ref DatabaseSubnetGroup
     Export:
       Name: !Sub '${AWS::StackName}-db-subnet-group'
+
+  # 📍 新增：数据库集群信息
+  DatabaseClusterEndpoint:
+    Description: RDS Cluster Endpoint
+    Value: !GetAtt DatabaseCluster.Endpoint.Address
+    Export:
+      Name: !Sub '${AWS::StackName}-db-cluster-endpoint'
+
+  DatabaseClusterPort:
+    Description: RDS Cluster Port
+    Value: !GetAtt DatabaseCluster.Endpoint.Port
+    Export:
+      Name: !Sub '${AWS::StackName}-db-cluster-port'
+
+  DatabaseClusterIdentifier:
+    Description: RDS Cluster Identifier
+    Value: !Ref DatabaseCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-db-cluster-id'

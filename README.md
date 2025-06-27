@@ -106,11 +106,11 @@ cp .env.example .env
 ```env
 # 数据库配置
 DATABASE_URL="file:./dev.db"
-DATABASE_READ_URL="file:./dev.db"
+READ_DATABASE_URL="file:./dev.db"
 
 # 如果使用 PostgreSQL
 # DATABASE_URL="postgresql://username:password@localhost:5432/mydatabase"
-# DATABASE_READ_URL="postgresql://username:password@localhost:5432/mydatabase"
+# READ_DATABASE_URL="postgresql://username:password@localhost:5432/mydatabase"
 
 # GitHub API 配置
 GITHUB_TOKEN=ghp_your_github_token_here

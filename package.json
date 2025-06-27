@@ -18,7 +18,10 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "prisma:generate": "prisma generate",
+    "prisma:generate:lambda": "PRISMA_CLI_BINARY_TARGETS=\"rhel-openssl-3.0.x\" prisma generate",
+    "build:lambda": "yarn prisma:generate:lambda && yarn build"
   },
   "dependencies": {
     "@nestjs/axios": "^4.0.0",
@@ -49,6 +52,7 @@
     "@types/jest": "^29.5.14",
     "@types/node": "^22.10.7",
     "@types/supertest": "^6.0.2",
+    "copy-webpack-plugin": "^13.0.0",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-prettier": "^5.2.2",
