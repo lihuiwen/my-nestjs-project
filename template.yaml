@@ -244,17 +244,28 @@ Resources:
       RouteTableId: !Ref PrivateRouteTable
       SubnetId: !Ref PrivateSubnet3
 
-  # Database Subnet Route Table Associations (确保数据库完全私有)
+  # Database Route Table (完全隔离，无外网访问)
+  DatabaseRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-database-routes'
+        - Key: Purpose
+          Value: Database-Isolated
+
+  # Database Subnet Route Table Associations (使用独立的数据库路由表)
   DatabaseSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref DatabaseRouteTable
       SubnetId: !Ref DatabaseSubnet1
 
   DatabaseSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref PrivateRouteTable
+      RouteTableId: !Ref DatabaseRouteTable
       SubnetId: !Ref DatabaseSubnet2
 
   # =====================================
@@ -604,3 +615,10 @@ Outputs:
     Value: !Ref DatabaseSubnetGroup
     Export:
       Name: !Sub '${AWS::StackName}-db-subnet-group'
+
+  # Database Route Table (网络隔离)
+  DatabaseRouteTableId:
+    Description: Database Route Table ID (isolated from internet)
+    Value: !Ref DatabaseRouteTable
+    Export:
+      Name: !Sub '${AWS::StackName}-db-route-table-id'

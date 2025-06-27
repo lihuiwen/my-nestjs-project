@@ -1,4 +1,4 @@
-import { Controller, Get, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, HttpException, HttpStatus, Post } from '@nestjs/common';
 import { AppService } from './app.service';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { PrismaReadWriteService } from './database/prisma-read-write.service';
@@ -16,6 +16,55 @@ export class AppController {
   @ApiResponse({ status: 200, description: 'Application is running' })
   getHello(): string {
     return this.appService.getHello();
+  }
+
+  @Post('migrate')
+  @ApiOperation({ summary: 'Run database migration' })
+  @ApiResponse({ status: 200, description: 'Migration completed successfully' })
+  async runMigration() {
+    console.log('🔧 开始数据库迁移...');
+    
+    try {
+      // 直接使用原始SQL创建表
+      await this.prismaService.write.$executeRaw`
+        CREATE TABLE IF NOT EXISTS "User" (
+          "id" SERIAL PRIMARY KEY,
+          "email" TEXT NOT NULL UNIQUE,
+          "name" TEXT,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+      `;
+      
+      await this.prismaService.write.$executeRaw`
+        CREATE TABLE IF NOT EXISTS "Post" (
+          "id" SERIAL PRIMARY KEY,
+          "title" TEXT NOT NULL,
+          "content" TEXT,
+          "published" BOOLEAN NOT NULL DEFAULT false,
+          "authorId" INTEGER NOT NULL,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY ("authorId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE
+        );
+      `;
+      
+      console.log('✅ 数据库表创建成功');
+      
+      return {
+        success: true,
+        message: '数据库迁移完成',
+        timestamp: new Date().toISOString(),
+        tables: ['User', 'Post']
+      };
+      
+    } catch (error) {
+      console.error('❌ 数据库迁移失败:', error);
+      throw new HttpException(
+        `Migration failed: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Get('health')

@@ -101,4 +101,47 @@ export class DatabaseService {
       where: { id },
     });
   }
+
+  // 创建用户同时创建多篇文章 - 写操作
+  async createUserWithPosts(data: {
+    name?: string;
+    email: string;
+    posts?: {
+      title: string;
+      content?: string;
+      published?: boolean;
+    }[];
+  }): Promise<User & { posts: Post[] }> {
+    return this.prisma.write.user.create({
+      data: {
+        name: data.name,
+        email: data.email,
+        posts: {
+          create: data.posts || [], // 如果没有提供文章，创建空数组
+        },
+      },
+      include: {
+        posts: true, // 返回结果中包含创建的文章
+      },
+    });
+  }
+
+  // 为现有用户批量添加文章 - 写操作
+  async addPostsToExistingUser(userId: number, posts: {
+    title: string;
+    content?: string;
+    published?: boolean;
+  }[]): Promise<User & { posts: Post[] }> {
+    return this.prisma.write.user.update({
+      where: { id: userId },
+      data: {
+        posts: {
+          create: posts,
+        },
+      },
+      include: {
+        posts: true,
+      },
+    });
+  }
 }
